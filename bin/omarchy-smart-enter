@@ -1,0 +1,162 @@
+#!/usr/bin/env python3
+"""
+omarchy-smart-enter
+Manage password detection and automatic enter for the Omarchy lock screen.
+"""
+
+import sys
+import os
+import json
+import secrets
+import hashlib
+import getpass
+import stat
+
+CONFIG_PATH = os.path.expanduser("~/.config/omarchy/smart_enter.json")
+LEGACY_CONFIG_PATH = os.path.expanduser("~/.config/omarchy/lock_hash.json")
+
+
+def ensure_config_dir():
+    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+
+
+def load_config():
+    for p in (CONFIG_PATH, LEGACY_CONFIG_PATH):
+        if os.path.exists(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    return json.load(f), p
+            except Exception:
+                pass
+    return None, CONFIG_PATH
+
+
+def save_config(data):
+    ensure_config_dir()
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    mode = 0o600
+    fd = os.open(CONFIG_PATH, flags, mode)
+    with open(fd, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    os.chmod(CONFIG_PATH, 0o600)
+
+
+def compute_hash(salt: str, password: str) -> str:
+    return hashlib.sha256((salt + password).encode("utf-8")).hexdigest()
+
+
+def cmd_status():
+    cfg, active_path = load_config()
+    if not cfg:
+        print("Smart Enter status: Not configured (disabled)")
+        return
+    enabled = cfg.get("enabled", False)
+    has_hash = bool(cfg.get("salt") and cfg.get("hash"))
+    if enabled and has_hash:
+        print("Smart Enter status: Enabled")
+        print(f"Active config: {active_path} (permissions: {oct(stat.S_IMODE(os.stat(active_path).st_mode))})")
+    else:
+        print("Smart Enter status: Disabled")
+
+
+def cmd_setup():
+    print("=== Omarchy Smart Enter Setup ===")
+    print("This registers a salted SHA-256 hash of your password so the lock")
+    print("screen instantly submits when you type the last character,")
+    print("without needing to press Enter.")
+    print()
+    p1 = getpass.getpass("Enter your lock screen password: ")
+    if not p1:
+        print("Error: Password cannot be empty.")
+        sys.exit(1)
+
+    p2 = getpass.getpass("Confirm your lock screen password: ")
+    if p1 != p2:
+        print("Error: Passwords do not match.")
+        sys.exit(1)
+
+    salt = secrets.token_hex(16)
+    pw_hash = compute_hash(salt, p1)
+
+    data = {
+        "enabled": True,
+        "salt": salt,
+        "hash": pw_hash
+    }
+    save_config(data)
+    print()
+    print("✓ Smart Enter successfully configured and enabled!")
+    print(f"✓ Configuration saved securely to {CONFIG_PATH} (mode 600).")
+    print()
+    print("You can test it now by locking your screen (`omarchy system lock` or Super+Esc).")
+
+
+def cmd_test():
+    cfg, _ = load_config()
+    if not cfg or not cfg.get("salt") or not cfg.get("hash"):
+        print("Error: Smart Enter is not configured yet. Run 'omarchy-smart-enter setup' first.")
+        sys.exit(1)
+
+    p = getpass.getpass("Enter password to test Smart Enter match: ")
+    salt = cfg["salt"]
+    expected_hash = cfg["hash"]
+    test_hash = compute_hash(salt, p)
+
+    if test_hash == expected_hash:
+        print("✓ Match successful! Smart Enter will trigger immediately on this password.")
+    else:
+        print("✗ Password did not match the stored hash.")
+
+
+def cmd_disable():
+    cfg, active_path = load_config()
+    if not cfg:
+        print("Smart Enter is already not configured.")
+        return
+    cfg["enabled"] = False
+    save_config(cfg)
+    print("✓ Smart Enter disabled.")
+
+
+def cmd_enable():
+    cfg, _ = load_config()
+    if not cfg or not cfg.get("salt") or not cfg.get("hash"):
+        print("Error: No password hash configured. Run 'omarchy-smart-enter setup' first.")
+        sys.exit(1)
+    cfg["enabled"] = True
+    save_config(cfg)
+    print("✓ Smart Enter enabled.")
+
+
+def main():
+    if len(sys.argv) < 2:
+        cmd = "status"
+    else:
+        cmd = sys.argv[1].lower()
+
+    if cmd in ("status", "info"):
+        cmd_status()
+    elif cmd in ("setup", "set"):
+        cmd_setup()
+    elif cmd in ("test", "verify"):
+        cmd_test()
+    elif cmd in ("disable", "off"):
+        cmd_disable()
+    elif cmd in ("enable", "on"):
+        cmd_enable()
+    elif cmd == "save-hash":
+        if len(sys.argv) < 4:
+            sys.exit(1)
+        salt = sys.argv[2]
+        pw_hash = sys.argv[3]
+        save_config({"enabled": True, "salt": salt, "hash": pw_hash})
+        print("✓ Hash saved.")
+        sys.exit(0)
+    else:
+        print("Usage: omarchy-smart-enter [setup|status|test|enable|disable]")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

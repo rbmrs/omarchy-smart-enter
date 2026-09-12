@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "omarchy-smart-enter",
+  "name": "Smart Enter Lock Screen",
+  "version": "1.0.0",
+  "author": "rbm",
+  "description": "Auto-submits your password the exact millisecond it is typed—no Enter key required.",
+  "omarchy": {
+    "capabilities": [
+      "authentication"
+    ],
+    "clonedFrom": "omarchy.lock"
+  },
+  "kinds": [
+    "service"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "Service.qml"
+  }
+}

@@ -1,0 +1,6 @@
+*.log
+*.tmp
+*~
+.DS_Store
+smart_enter.json
+lock_hash.json
