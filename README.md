@@ -39,7 +39,7 @@ On standard Linux/Arch systems, `/etc/pam.d/omarchy-lock-password` enforces `pam
 ### Method 1: Using `omarchy plugin add` (Recommended)
 
 ```bash
-omarchy plugin add https://github.com/<your-username>/omarchy-smart-enter.git --enable --yes
+omarchy plugin add https://github.com/rbmrs/omarchy-smart-enter.git --enable --yes
 ```
 
 ### Method 2: Manual Installation / Local Development
@@ -47,7 +47,7 @@ omarchy plugin add https://github.com/<your-username>/omarchy-smart-enter.git --
 Clone this repository and run the included installer:
 
 ```bash
-git clone https://github.com/<your-username>/omarchy-smart-enter.git
+git clone https://github.com/rbmrs/omarchy-smart-enter.git
 cd omarchy-smart-enter
 ./install.sh
 ```
