@@ -52,6 +52,22 @@ cd omarchy-smart-enter
 ./install.sh
 ```
 
+### Removal
+
+To remove the plugin:
+
+```bash
+omarchy plugin remove omarchy-smart-enter
+```
+
+Or if installed manually:
+
+```bash
+rm -rf ~/.config/omarchy/plugins/omarchy-smart-enter
+rm -f ~/.local/bin/omarchy-smart-enter
+omarchy restart shell
+```
+
 ---
 
 ## Usage
