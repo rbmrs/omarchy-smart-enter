@@ -2,6 +2,7 @@
 """
 omarchy-smart-enter
 Manage password detection and automatic enter for the Omarchy lock screen.
+Zero-disk-persistence architecture backed by the Linux Kernel Session Keyring.
 """
 
 import sys
@@ -9,64 +10,193 @@ import os
 import json
 import secrets
 import hashlib
+import hmac
 import getpass
 import stat
+import subprocess
 
 CONFIG_PATH = os.path.expanduser("~/.config/omarchy/smart_enter.json")
 LEGACY_CONFIG_PATH = os.path.expanduser("~/.config/omarchy/lock_hash.json")
+KEYRING_TYPE = "user"
+KEY_DESC = "omarchy:smart_enter"
+KEYRING_TARGET = "@s"
+
+
+def validate_ancestors():
+    """Verify parent directory ~/.config/omarchy and ancestors exist, are owned by current UID, and are not symlinks."""
+    uid = os.getuid()
+    config_base = os.path.expanduser("~/.config")
+    parent_dir = os.path.expanduser("~/.config/omarchy")
+
+    if os.path.exists(config_base):
+        st_base = os.lstat(config_base)
+        if stat.S_ISLNK(st_base.st_mode):
+            raise RuntimeError(f"Ancestor path '{config_base}' is a symlink")
+        if not stat.S_ISDIR(st_base.st_mode):
+            raise RuntimeError(f"Ancestor path '{config_base}' is not a directory")
+        if st_base.st_uid != uid:
+            raise PermissionError(f"Ancestor path '{config_base}' is not owned by current user (uid={uid})")
+
+    if not os.path.exists(parent_dir):
+        raise RuntimeError(f"Parent directory '{parent_dir}' does not exist")
+    st_parent = os.lstat(parent_dir)
+    if stat.S_ISLNK(st_parent.st_mode):
+        raise RuntimeError(f"Parent directory '{parent_dir}' is a symlink")
+    if not stat.S_ISDIR(st_parent.st_mode):
+        raise RuntimeError(f"Parent directory '{parent_dir}' is not a directory")
+    if st_parent.st_uid != uid:
+        raise PermissionError(f"Parent directory '{parent_dir}' is not owned by current user (uid={uid})")
 
 
 def ensure_config_dir():
-    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+    os.makedirs(os.path.dirname(CONFIG_PATH), mode=0o700, exist_ok=True)
 
 
 def load_config():
-    for p in (CONFIG_PATH, LEGACY_CONFIG_PATH):
-        if os.path.exists(p):
-            try:
-                with open(p, "r", encoding="utf-8") as f:
-                    return json.load(f), p
-            except Exception:
-                pass
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                return json.load(f), CONFIG_PATH
+        except Exception:
+            pass
     return None, CONFIG_PATH
 
 
 def save_config(data):
+    """Safely write non-sensitive configuration using atomic replacement and O_NOFOLLOW."""
     ensure_config_dir()
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    mode = 0o600
-    fd = os.open(CONFIG_PATH, flags, mode)
-    with open(fd, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-        f.write("\n")
-    os.chmod(CONFIG_PATH, 0o600)
+    validate_ancestors()
+    dir_name = os.path.dirname(CONFIG_PATH)
+    tmp_path = os.path.join(dir_name, f".smart_enter.tmp.{secrets.token_hex(8)}")
+    flags = os.O_NOFOLLOW | os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    fd = os.open(tmp_path, flags, 0o600)
+    try:
+        with open(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(fd)
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, CONFIG_PATH)
+        os.chmod(CONFIG_PATH, 0o600)
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+    if os.path.exists(LEGACY_CONFIG_PATH):
+        try:
+            os.remove(LEGACY_CONFIG_PATH)
+        except OSError:
+            pass
 
 
-def compute_hash(salt: str, password: str) -> str:
-    return hashlib.sha256((salt + password).encode("utf-8")).hexdigest()
+def compute_hmac(salt: str, password: str) -> str:
+    """Compute HMAC-SHA256 of the password keyed by the session salt."""
+    return hmac.new(salt.encode("utf-8"), password.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def keyring_search() -> str | None:
+    """Find the key ID in session keyring @s, or None if not found."""
+    try:
+        res = subprocess.run(
+            ["keyctl", "search", KEYRING_TARGET, KEYRING_TYPE, KEY_DESC],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+        if res.returncode == 0:
+            kid = res.stdout.strip()
+            return kid if kid else None
+    except Exception:
+        pass
+    return None
+
+
+def keyring_load() -> dict | None:
+    """Load session verifier dictionary from session keyring, or None."""
+    kid = keyring_search()
+    if not kid:
+        return None
+    try:
+        res = subprocess.run(
+            ["keyctl", "pipe", kid],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            return json.loads(res.stdout.strip())
+    except Exception:
+        pass
+    return None
+
+
+def keyring_store(salt: str, verifier: str) -> bool:
+    """Store session verifier in session keyring with possessor-only permissions."""
+    payload = json.dumps({"salt": salt, "verifier": verifier})
+    try:
+        p = subprocess.run(
+            ["keyctl", "padd", KEYRING_TYPE, KEY_DESC, KEYRING_TARGET],
+            input=payload,
+            capture_output=True,
+            text=True,
+            check=False
+        )
+        if p.returncode == 0:
+            kid = p.stdout.strip()
+            if kid:
+                subprocess.run(["keyctl", "setperm", kid, "0x3f000000"], check=False)
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def keyring_purge() -> bool:
+    """Purge session verifier from session keyring."""
+    try:
+        subprocess.run(
+            ["keyctl", "purge", "-s", KEYRING_TYPE, KEY_DESC],
+            capture_output=True,
+            check=False
+        )
+        return True
+    except Exception:
+        return False
 
 
 def cmd_status():
     cfg, active_path = load_config()
-    if not cfg:
-        print("Smart Enter status: Not configured (disabled)")
-        return
-    enabled = cfg.get("enabled", False)
-    has_hash = bool(cfg.get("salt") and cfg.get("hash"))
-    if enabled and has_hash:
-        print("Smart Enter status: Enabled")
-        print(f"Active config: {active_path} (permissions: {oct(stat.S_IMODE(os.stat(active_path).st_mode))})")
+    enabled = bool(cfg and cfg.get("enabled", False))
+    session_data = keyring_load()
+    is_primed = bool(session_data and session_data.get("salt") and session_data.get("verifier"))
+
+    print("=== Omarchy Smart Enter Status ===")
+    if enabled:
+        print("Configured State: Enabled (mode: ephemeral kernel keyring)")
+        if is_primed:
+            print("Session Status:   Active (primed in Linux Kernel Keyring @s)")
+        else:
+            print("Session Status:   Unprimed (unlock once with Enter or run 'omarchy-smart-enter setup')")
+        if os.path.exists(active_path):
+            mode_str = oct(stat.S_IMODE(os.stat(active_path).st_mode))
+            print(f"Active Config:    {active_path} (permissions: {mode_str})")
     else:
-        print("Smart Enter status: Disabled")
+        print("Configured State: Disabled")
+        if is_primed:
+            print("Session Status:   Keyring retained (will not auto-unlock while disabled)")
 
 
 def cmd_setup():
     print("=== Omarchy Smart Enter Setup ===")
-    print("This registers a salted SHA-256 hash of your password so the lock")
-    print("screen instantly submits when you type the last character,")
-    print("without needing to press Enter.")
+    print("This configures instant password detection using an ephemeral")
+    print("verifier stored only in the Linux Kernel Session Keyring (@s).")
+    print("No passwords, hashes, or salts are ever written to disk.")
     print()
-    p1 = getpass.getpass("Enter your lock screen password: ")
+    p1 = getpass.getpass("Enter your lock screen password to prime session: ")
     if not p1:
         print("Error: Password cannot be empty.")
         sys.exit(1)
@@ -76,57 +206,92 @@ def cmd_setup():
         print("Error: Passwords do not match.")
         sys.exit(1)
 
-    salt = secrets.token_hex(16)
-    pw_hash = compute_hash(salt, p1)
+    salt = secrets.token_hex(32)
+    verifier = compute_hmac(salt, p1)
 
-    data = {
-        "enabled": True,
-        "salt": salt,
-        "hash": pw_hash
-    }
-    save_config(data)
+    if not keyring_store(salt, verifier):
+        print("Warning: Could not prime Linux Kernel Keyring directly.")
+        print("The session will be primed automatically on your first screen unlock.")
+
+    save_config({"enabled": True})
+
+    # Clean up legacy lock_hash.json if present
+    if os.path.exists(LEGACY_CONFIG_PATH):
+        try:
+            os.remove(LEGACY_CONFIG_PATH)
+        except OSError:
+            pass
+
     print()
-    print("✓ Smart Enter successfully configured and enabled!")
-    print(f"✓ Configuration saved securely to {CONFIG_PATH} (mode 600).")
-    print()
-    print("You can test it now by locking your screen (`omarchy system lock` or Super+Esc).")
+    print("Smart Enter successfully configured and enabled.")
+    print("Ephemeral session verifier loaded into Linux Kernel Keyring.")
+    print(f"Zero-persistence config saved to {CONFIG_PATH}.")
 
 
 def cmd_test():
     cfg, _ = load_config()
-    if not cfg or not cfg.get("salt") or not cfg.get("hash"):
-        print("Error: Smart Enter is not configured yet. Run 'omarchy-smart-enter setup' first.")
+    enabled = bool(cfg and cfg.get("enabled", False))
+    if not enabled:
+        print("Notice: Smart Enter is currently disabled in config.")
+
+    session_data = keyring_load()
+    if not session_data or not session_data.get("salt") or not session_data.get("verifier"):
+        print("Error: Session keyring is not primed. Unlock your screen once or run 'omarchy-smart-enter setup'.")
         sys.exit(1)
 
     p = getpass.getpass("Enter password to test Smart Enter match: ")
-    salt = cfg["salt"]
-    expected_hash = cfg["hash"]
-    test_hash = compute_hash(salt, p)
+    salt = session_data["salt"]
+    expected_verifier = session_data["verifier"]
+    test_verifier = compute_hmac(salt, p)
 
-    if test_hash == expected_hash:
-        print("✓ Match successful! Smart Enter will trigger immediately on this password.")
+    if hmac.compare_digest(test_verifier, expected_verifier):
+        print("Match successful. Smart Enter will trigger immediately on this password.")
     else:
-        print("✗ Password did not match the stored hash.")
+        print("Password did not match the ephemeral session verifier.")
+        sys.exit(1)
 
 
 def cmd_disable():
-    cfg, active_path = load_config()
-    if not cfg:
-        print("Smart Enter is already not configured.")
-        return
-    cfg["enabled"] = False
-    save_config(cfg)
-    print("✓ Smart Enter disabled.")
+    save_config({"enabled": False})
+    keyring_purge()
+    print("Smart Enter disabled and session keyring cleared.")
 
 
 def cmd_enable():
-    cfg, _ = load_config()
-    if not cfg or not cfg.get("salt") or not cfg.get("hash"):
-        print("Error: No password hash configured. Run 'omarchy-smart-enter setup' first.")
+    save_config({"enabled": True})
+    print("Smart Enter enabled.")
+    session_data = keyring_load()
+    if session_data:
+        print("Session is active in Kernel Keyring.")
+    else:
+        print("Session will prime automatically upon your next unlock.")
+
+
+def cmd_session_store():
+    """Internal helper to store session verifier from stdin into kernel keyring."""
+    try:
+        raw = sys.stdin.readline().strip()
+        if not raw:
+            sys.exit(1)
+        data = json.loads(raw)
+        salt = data.get("salt")
+        verifier = data.get("verifier")
+        if not salt or not verifier:
+            sys.exit(1)
+        if keyring_store(salt, verifier):
+            sys.exit(0)
         sys.exit(1)
-    cfg["enabled"] = True
-    save_config(cfg)
-    print("✓ Smart Enter enabled.")
+    except Exception:
+        sys.exit(1)
+
+
+def cmd_session_load():
+    """Internal helper to load session verifier from kernel keyring to stdout."""
+    data = keyring_load()
+    if data:
+        print(json.dumps(data))
+        sys.exit(0)
+    sys.exit(1)
 
 
 def main():
@@ -145,14 +310,10 @@ def main():
         cmd_disable()
     elif cmd in ("enable", "on"):
         cmd_enable()
-    elif cmd == "save-hash":
-        if len(sys.argv) < 4:
-            sys.exit(1)
-        salt = sys.argv[2]
-        pw_hash = sys.argv[3]
-        save_config({"enabled": True, "salt": salt, "hash": pw_hash})
-        print("✓ Hash saved.")
-        sys.exit(0)
+    elif cmd == "session-store":
+        cmd_session_store()
+    elif cmd == "session-load":
+        cmd_session_load()
     else:
         print("Usage: omarchy-smart-enter [setup|status|test|enable|disable]")
         sys.exit(1)

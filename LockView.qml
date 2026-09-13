@@ -19,7 +19,8 @@ Item {
   property bool loadBackground: true
   property string passwordText: ""
   property bool syncingPasswordText: false
-  property var autoUnlockConfig: null
+  property bool smartEnterEnabled: false
+  property var sessionVerifier: null
 
   readonly property string placeholderText: "Enter Password"
   readonly property int fieldWidth: 381
@@ -171,9 +172,9 @@ Item {
           }
           if (text.length > 0 && root.failureMessage.length > 0) root.clearFailureRequested()
 
-          if (root.autoUnlockConfig && root.inputEnabled && !root.authenticatingPassword && text.length > 0) {
-            var candidateHash = Sha256.sha256(root.autoUnlockConfig.salt + text)
-            if (candidateHash === root.autoUnlockConfig.hash) {
+          if (root.smartEnterEnabled && root.sessionVerifier && root.sessionVerifier.salt && root.sessionVerifier.verifier && root.inputEnabled && !root.authenticatingPassword && text.length > 0) {
+            var candidateVerifier = Sha256.hmacSha256(root.sessionVerifier.salt, text)
+            if (candidateVerifier === root.sessionVerifier.verifier) {
               var submitted = text
               root.passwordTextEdited("")
               root.submitPassword(submitted)

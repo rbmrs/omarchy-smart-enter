@@ -13,8 +13,7 @@ function utf8Encode(str) {
   return unescape(encodeURIComponent(str));
 }
 
-function sha256(str) {
-  var ascii = utf8Encode(str);
+function sha256Raw(str) {
   function rightRotate(value, amount) {
     return (value >>> amount) | (value << (32 - amount));
   }
@@ -22,10 +21,8 @@ function sha256(str) {
   var mathPow = Math.pow;
   var maxWord = mathPow(2, 32);
   var i, j;
-  var result = "";
-
   var words = [];
-  var asciiBitLength = ascii.length * 8;
+  var asciiBitLength = str.length * 8;
 
   var hash = [];
   var k = [];
@@ -45,10 +42,10 @@ function sha256(str) {
     }
   }
 
-  ascii += "\x80";
-  while ((ascii.length % 64) - 56) ascii += "\x00";
-  for (i = 0; i < ascii.length; i++) {
-    j = ascii.charCodeAt(i);
+  str += "\x80";
+  while ((str.length % 64) - 56) str += "\x00";
+  for (i = 0; i < str.length; i++) {
+    j = str.charCodeAt(i);
     words[i >> 2] |= j << (((3 - i) % 4) * 8);
   }
   words[words.length] = (asciiBitLength / maxWord) | 0;
@@ -86,11 +83,45 @@ function sha256(str) {
     }
   }
 
+  var raw = "";
   for (i = 0; i < 8; i++) {
     for (j = 3; j >= 0; j--) {
-      var b = (hash[i] >> (8 * j)) & 255;
-      result += (b < 16 ? "0" : "") + b.toString(16);
+      raw += String.fromCharCode((hash[i] >> (8 * j)) & 255);
     }
   }
+  return raw;
+}
+
+function hexFromRaw(raw) {
+  var result = "";
+  for (var i = 0; i < raw.length; i++) {
+    var b = raw.charCodeAt(i) & 255;
+    result += (b < 16 ? "0" : "") + b.toString(16);
+  }
   return result;
+}
+
+function sha256(str) {
+  return hexFromRaw(sha256Raw(utf8Encode(str)));
+}
+
+function hmacSha256(key, message) {
+  var k = utf8Encode(key);
+  var m = utf8Encode(message);
+  if (k.length > 64) {
+    k = sha256Raw(k);
+  }
+  while (k.length < 64) {
+    k += "\x00";
+  }
+  var oKeyPad = "";
+  var iKeyPad = "";
+  for (var i = 0; i < 64; i++) {
+    var c = k.charCodeAt(i);
+    oKeyPad += String.fromCharCode(c ^ 0x5c);
+    iKeyPad += String.fromCharCode(c ^ 0x36);
+  }
+  var innerHash = sha256Raw(iKeyPad + m);
+  var outerHash = sha256Raw(oKeyPad + innerHash);
+  return hexFromRaw(outerHash);
 }

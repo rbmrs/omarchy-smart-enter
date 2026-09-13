@@ -34,7 +34,8 @@ Item {
   property string lastEventAt: ""
   property bool strandedLock: false
   property bool strandedLockResolved: false
-  property var autoUnlockConfig: null
+  property bool smartEnterEnabled: false
+  property var sessionVerifier: null
 
   FileView {
     id: smartEnterFile
@@ -44,55 +45,119 @@ Item {
     onLoaded: {
       try {
         var data = JSON.parse(text())
-        if (data && data.enabled && data.salt && data.hash) {
-          root.autoUnlockConfig = data
-          root.logEvent("smart-enter: config-loaded")
-          return
-        }
-      } catch (e) {}
-      legacyLockHashFile.reload()
-    }
-    onLoadFailed: legacyLockHashFile.reload()
-    onFileChanged: reload()
-  }
-
-  FileView {
-    id: legacyLockHashFile
-    path: root.home + "/.config/omarchy/lock_hash.json"
-    watchChanges: true
-    printErrors: false
-    onLoaded: {
-      if (root.autoUnlockConfig) return
-      try {
-        var data = JSON.parse(text())
-        if (data && data.enabled && data.salt && data.hash) {
-          root.autoUnlockConfig = data
-          root.logEvent("smart-enter: legacy-config-loaded")
-          return
-        }
-      } catch (e) {}
-      root.autoUnlockConfig = null
+        root.smartEnterEnabled = !!(data && data.enabled)
+        root.logEvent("smart-enter: config-loaded enabled=" + root.smartEnterEnabled)
+      } catch (e) {
+        root.smartEnterEnabled = false
+      }
     }
     onLoadFailed: {
-      if (!root.autoUnlockConfig) root.autoUnlockConfig = null
+      root.smartEnterEnabled = false
     }
     onFileChanged: reload()
   }
 
   function recordSuccessfulPassword(password) {
     if (!password || password.length === 0) return
+    if (!root.smartEnterEnabled) return
+
     var salt = Sha256.randomSalt()
-    var hash = Sha256.sha256(salt + password)
-    root.logEvent("smart-enter: recording-hash")
-    saveHashProc.command = ["omarchy-smart-enter", "save-hash", salt, hash]
-    saveHashProc.running = true
+    var verifier = Sha256.hmacSha256(salt, password)
+    root.sessionVerifier = { "salt": salt, "verifier": verifier }
+    root.logEvent("smart-enter: session-verifier-cached")
+
+    sessionKeyringStoreProc.payload = JSON.stringify(root.sessionVerifier) + "\n"
+    if (sessionKeyringStoreProc.running) sessionKeyringStoreProc.running = false
+    sessionKeyringStoreProc.running = true
+  }
+
+  Timer {
+    id: sessionKeyringStoreWatchdog
+    interval: 3000
+    repeat: false
+    onTriggered: {
+      if (sessionKeyringStoreProc.running) {
+        root.logEvent("smart-enter: store-proc-timeout")
+        sessionKeyringStoreProc.running = false
+      }
+    }
   }
 
   Process {
-    id: saveHashProc
+    id: sessionKeyringStoreProc
+    property string payload: ""
+    command: [
+      "/usr/bin/bash",
+      "-c",
+      "read -r line; id=$(printf '%s' \"$line\" | /usr/bin/keyctl padd user omarchy:smart_enter @s) && /usr/bin/keyctl setperm \"$id\" 0x3f000000"
+    ]
+    clearEnvironment: true
+    environment: ({
+      "PATH": "/usr/bin",
+      "LC_ALL": "C",
+      "USER": root.userName,
+      "HOME": root.home
+    })
+    stdinEnabled: true
+    onStarted: {
+      sessionKeyringStoreWatchdog.restart()
+      write(payload)
+    }
     onExited: function(exitCode) {
-      root.logEvent("smart-enter: hash-saved exitCode=" + exitCode)
-      smartEnterFile.reload()
+      sessionKeyringStoreWatchdog.stop()
+      root.logEvent("smart-enter: keyring-stored exitCode=" + exitCode)
+    }
+  }
+
+  Timer {
+    id: sessionKeyringLoadWatchdog
+    interval: 3000
+    repeat: false
+    onTriggered: {
+      if (sessionKeyringLoadProc.running) {
+        root.logEvent("smart-enter: load-proc-timeout")
+        sessionKeyringLoadProc.running = false
+      }
+    }
+  }
+
+  Process {
+    id: sessionKeyringLoadProc
+    command: [
+      "/usr/bin/bash",
+      "-c",
+      "id=$(/usr/bin/keyctl search @s user omarchy:smart_enter 2>/dev/null) && [ -n \"$id\" ] && /usr/bin/keyctl pipe \"$id\""
+    ]
+    clearEnvironment: true
+    environment: ({
+      "PATH": "/usr/bin",
+      "LC_ALL": "C",
+      "USER": root.userName,
+      "HOME": root.home
+    })
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var raw = String(text || "").trim()
+        if (raw.length > 0) {
+          try {
+            var data = JSON.parse(raw)
+            if (data && data.salt && data.verifier) {
+              root.sessionVerifier = data
+              root.logEvent("smart-enter: keyring-loaded")
+            }
+          } catch (e) {
+            console.log("smart-enter: failed to parse keyring session verifier: " + e)
+          }
+        }
+      }
+    }
+    onStarted: {
+      sessionKeyringLoadWatchdog.restart()
+    }
+    onExited: function(exitCode) {
+      sessionKeyringLoadWatchdog.stop()
+      root.logEvent("smart-enter: keyring-load exitCode=" + exitCode)
     }
   }
 
@@ -330,7 +395,8 @@ Item {
       LockView {
         id: lockView
         anchors.fill: parent
-        autoUnlockConfig: root.autoUnlockConfig
+        smartEnterEnabled: root.smartEnterEnabled
+        sessionVerifier: root.sessionVerifier
         backgroundPath: root.backgroundPath
         backgroundVersion: root.backgroundVersion
         fingerprintConfigured: root.fingerprintConfigured
@@ -428,9 +494,28 @@ Item {
     onTriggered: root.startFingerprint()
   }
 
+  Timer {
+    id: readlinkWatchdog
+    interval: 3000
+    repeat: false
+    onTriggered: {
+      if (readlinkProc.running) {
+        root.logEvent("lock: readlink-timeout")
+        readlinkProc.running = false
+      }
+    }
+  }
+
   Process {
     id: readlinkProc
-    command: ["readlink", "-f", root.currentBackgroundLink]
+    command: ["/usr/bin/readlink", "-f", root.currentBackgroundLink]
+    clearEnvironment: true
+    environment: ({
+      "PATH": "/usr/bin",
+      "LC_ALL": "C",
+      "USER": root.userName,
+      "HOME": root.home
+    })
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -441,23 +526,73 @@ Item {
         }
       }
     }
+    onStarted: readlinkWatchdog.restart()
+    onExited: readlinkWatchdog.stop()
+  }
+
+  Timer {
+    id: fingerprintCheckWatchdog
+    interval: 3000
+    repeat: false
+    onTriggered: {
+      if (fingerprintCheckProc.running) {
+        root.logEvent("lock: fingerprint-check-timeout")
+        fingerprintCheckProc.running = false
+      }
+    }
   }
 
   Process {
     id: fingerprintCheckProc
-    command: ["bash", "-c", "if [[ -f /etc/pam.d/omarchy-lock-fingerprint ]] && command -v fprintd-list >/dev/null 2>&1 && fprintd-list \"$USER\" 2>/dev/null | grep -qi finger; then echo yes; else echo no; fi"]
+    command: [
+      "/usr/bin/bash",
+      "-c",
+      "if [[ -f /etc/pam.d/omarchy-lock-fingerprint ]] && command -v /usr/bin/fprintd-list >/dev/null 2>&1 && /usr/bin/fprintd-list \"$USER\" 2>/dev/null | grep -qi finger; then echo yes; else echo no; fi"
+    ]
+    clearEnvironment: true
+    environment: ({
+      "PATH": "/usr/bin",
+      "LC_ALL": "C",
+      "USER": root.userName,
+      "HOME": root.home
+    })
     stdout: StdioCollector { id: fingerprintCheckStdout; waitForEnd: true }
-    onExited: {
+    onStarted: fingerprintCheckWatchdog.restart()
+    onExited: function() {
+      fingerprintCheckWatchdog.stop()
       root.fingerprintConfigured = String(fingerprintCheckStdout.text || "").trim() === "yes"
       if (root.lockRequested && root.fingerprintConfigured) root.startFingerprint()
       else if (!root.fingerprintConfigured && fingerprintPam.active) fingerprintPam.abort()
     }
   }
 
+  Timer {
+    id: strandedLockWatchdog
+    interval: 3000
+    repeat: false
+    onTriggered: {
+      if (strandedLockCheckProc.running) {
+        root.logEvent("lock: stranded-check-timeout")
+        strandedLockCheckProc.running = false
+      }
+    }
+  }
+
   Process {
     id: strandedLockCheckProc
-    command: ["bash", "-c", "omarchy-hyprland-session-locked"]
+    command: ["/usr/bin/bash", "-c", "/usr/bin/omarchy-hyprland-session-locked"]
+    clearEnvironment: true
+    environment: ({
+      "PATH": "/usr/bin",
+      "LC_ALL": "C",
+      "USER": root.userName,
+      "HOME": root.home,
+      "XDG_RUNTIME_DIR": Quickshell.env("XDG_RUNTIME_DIR") || ("/run/user/" + root.userName),
+      "HYPRLAND_INSTANCE_SIGNATURE": Quickshell.env("HYPRLAND_INSTANCE_SIGNATURE") || ""
+    })
+    onStarted: strandedLockWatchdog.restart()
     onExited: function(exitCode) {
+      strandedLockWatchdog.stop()
       // No output to read the lock off yet.
       if (exitCode === 2) return
 
@@ -469,14 +604,60 @@ Item {
     }
   }
 
+  Timer {
+    id: wakeWatchdog
+    interval: 3000
+    repeat: false
+    onTriggered: {
+      if (wakeProcess.running) {
+        root.logEvent("lock: wake-timeout")
+        wakeProcess.running = false
+      }
+    }
+  }
+
   Process {
     id: wakeProcess
-    command: ["bash", "-c", "omarchy-system-wake"]
+    command: ["/usr/bin/bash", "-c", "/usr/bin/omarchy-system-wake"]
+    clearEnvironment: true
+    environment: ({
+      "PATH": "/usr/bin",
+      "LC_ALL": "C",
+      "USER": root.userName,
+      "HOME": root.home
+    })
+    onStarted: wakeWatchdog.restart()
+    onExited: wakeWatchdog.stop()
+  }
+
+  Timer {
+    id: blankWatchdog
+    interval: 3000
+    repeat: false
+    onTriggered: {
+      if (blankProcess.running) {
+        root.logEvent("lock: blank-timeout")
+        blankProcess.running = false
+      }
+    }
   }
 
   Process {
     id: blankProcess
-    command: ["bash", "-c", "omarchy-brightness-keyboard off; omarchy-brightness-display off"]
+    command: [
+      "/usr/bin/bash",
+      "-c",
+      "/usr/bin/omarchy-brightness-keyboard off; /usr/bin/omarchy-brightness-display off"
+    ]
+    clearEnvironment: true
+    environment: ({
+      "PATH": "/usr/bin",
+      "LC_ALL": "C",
+      "USER": root.userName,
+      "HOME": root.home
+    })
+    onStarted: blankWatchdog.restart()
+    onExited: blankWatchdog.stop()
   }
 
   Timer {
@@ -573,6 +754,7 @@ Item {
     refreshBackground()
     refreshFingerprintStatus()
     checkStrandedLock()
+    if (!sessionKeyringLoadProc.running) sessionKeyringLoadProc.running = true
   }
 
   IpcHandler {
@@ -599,6 +781,8 @@ Item {
         passwordPam: root.passwordPamConfigured,
         fingerprint: root.fingerprintConfigured,
         authenticating: root.authenticating,
+        smartEnterEnabled: root.smartEnterEnabled,
+        sessionPrimed: root.sessionVerifier !== null,
         lastEvent: root.lastEvent,
         lastEventAt: root.lastEventAt
       })
