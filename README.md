@@ -67,7 +67,10 @@ omarchy plugin remove omarchy-smart-enter
 omarchy plugin enable omarchy.lock
 rm -f ~/.local/bin/omarchy-smart-enter
 omarchy plugin add https://github.com/rbmrs/omarchy-smart-enter.git --enable
+omarchy restart shell
 ```
+
+The shell can keep running the previously loaded 1.x code until it restarts, so restart it after upgrading by any method. Afterwards, `omarchy-shell lock status` should include `smartEnterArmed`.
 
 `omarchy plugin remove` keeps a backup folder named `~/.config/omarchy/plugins/.omarchy-smart-enter.bak.*`, which you can delete.
 
