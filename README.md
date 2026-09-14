@@ -57,6 +57,12 @@ cd omarchy-smart-enter
 omarchy plugin remove omarchy-smart-enter
 ```
 
+Or run the uninstaller script:
+
+```bash
+./uninstall.sh
+```
+
 ---
 
 ## Usage

@@ -31,6 +31,8 @@ echo "✓ CLI tool installed to $BIN_DIR/omarchy-smart-enter"
 if command -v omarchy >/dev/null 2>&1; then
   echo "Enabling plugin in Omarchy..."
   omarchy-shell -q shell rescanPlugins || true
+  omarchy plugin disable omarchy.lock 2>/dev/null || true
+  omarchy plugin disable rbm.lock 2>/dev/null || true
   omarchy plugin enable omarchy-smart-enter || true
   echo "Restarting Omarchy shell..."
   omarchy restart shell
