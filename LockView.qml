@@ -1,10 +1,7 @@
 import QtQuick
 import QtQuick.Effects
-import Quickshell
-import Quickshell.Io
 import qs.Commons
 import qs.Ui
-import "Sha256.js" as Sha256
 
 Item {
   id: root
@@ -19,8 +16,8 @@ Item {
   property bool loadBackground: true
   property string passwordText: ""
   property bool syncingPasswordText: false
-  property bool smartEnterEnabled: false
-  property var sessionVerifier: null
+  // Length of the last manually accepted password; 0 disables auto-submit.
+  property int autoSubmitLength: 0
 
   readonly property string placeholderText: "Enter Password"
   readonly property int fieldWidth: 381
@@ -44,6 +41,7 @@ Item {
     : Border.surfaceSpec("lock", "border-active", Color.lock.borderActive, root.outlineThickness, "border-alpha")
 
   signal submitPassword(string password)
+  signal autoSubmitPassword(string password)
   signal passwordTextEdited(string password)
   signal clearFailureRequested()
   signal wakeRequested()
@@ -172,13 +170,12 @@ Item {
           }
           if (text.length > 0 && root.failureMessage.length > 0) root.clearFailureRequested()
 
-          if (root.smartEnterEnabled && root.sessionVerifier && root.sessionVerifier.salt && root.sessionVerifier.verifier && root.inputEnabled && !root.authenticatingPassword && text.length > 0) {
-            var candidateVerifier = Sha256.hmacSha256(root.sessionVerifier.salt, text)
-            if (candidateVerifier === root.sessionVerifier.verifier) {
-              var submitted = text
-              root.passwordTextEdited("")
-              root.submitPassword(submitted)
-            }
+          // Smart Enter: submit once the input reaches the length of the last
+          // manually accepted password. PAM still makes the decision.
+          if (!root.syncingPasswordText && root.autoSubmitLength > 0 && text.length === root.autoSubmitLength && root.inputEnabled && !root.authenticatingPassword) {
+            var submitted = text
+            root.passwordTextEdited("")
+            root.autoSubmitPassword(submitted)
           }
         }
 

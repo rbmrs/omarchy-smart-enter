@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "id": "omarchy-smart-enter",
   "name": "Smart Enter Lock Screen",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "author": "rbm",
-  "description": "Auto-submits your password the exact millisecond it is typed: no Enter key required.",
+  "description": "Auto-submits your lock screen password as soon as you finish typing it: no Enter key required.",
   "omarchy": {
     "capabilities": [
       "authentication"
