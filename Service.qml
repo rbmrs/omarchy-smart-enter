@@ -4,7 +4,6 @@ import Quickshell.Io
 import Quickshell.Services.Pam
 import Quickshell.Wayland
 import qs.Commons
-import "Sha256.js" as Sha256
 
 Item {
   id: root
@@ -34,62 +33,57 @@ Item {
   property string lastEventAt: ""
   property bool strandedLock: false
   property bool strandedLockResolved: false
-  property bool smartEnterEnabled: false
-  property var sessionVerifier: null
+  // Smart Enter: after a manual Enter unlock succeeds, only the password's
+  // length is kept, in memory. Input that reaches that length is submitted to
+  // PAM, so every attempt still counts toward pam_faillock. No password, hash,
+  // or verifier is kept anywhere.
+  property int smartEnterLength: 0
+  property bool pendingAutoSubmit: false
+  // Consecutive failed auto-submits. One is usually a typo; repeated failures
+  // suggest a stale remembered length, so Smart Enter disarms.
+  property int smartEnterFailures: 0
+  readonly property int smartEnterFailureLimit: 2
 
-  FileView {
-    id: smartEnterFile
-    path: root.home + "/.config/omarchy/smart_enter.json"
-    watchChanges: true
-    printErrors: false
-    onLoaded: {
-      try {
-        var data = JSON.parse(text())
-        root.smartEnterEnabled = !!(data && data.enabled)
-        root.logEvent("smart-enter: config-loaded enabled=" + root.smartEnterEnabled)
-      } catch (e) {
-        root.smartEnterEnabled = false
-      }
-    }
-    onLoadFailed: {
-      root.smartEnterEnabled = false
-    }
-    onFileChanged: reload()
+  function primeSmartEnter(length) {
+    if (length <= 0) return
+    smartEnterFailures = 0
+    smartEnterLength = length
+    logEvent("smart-enter: armed")
   }
 
-  function recordSuccessfulPassword(password) {
-    if (!password || password.length === 0) return
-    if (!root.smartEnterEnabled) return
+  function disarmSmartEnter(reason) {
+    smartEnterFailures = 0
+    if (smartEnterLength === 0) return
+    smartEnterLength = 0
+    logEvent("smart-enter: disarmed " + reason)
+  }
 
-    var salt = Sha256.randomSalt()
-    var verifier = Sha256.hmacSha256(salt, password)
-    root.sessionVerifier = { "salt": salt, "verifier": verifier }
-    root.logEvent("smart-enter: session-verifier-cached")
-
-    sessionKeyringStoreProc.payload = JSON.stringify(root.sessionVerifier) + "\n"
-    if (sessionKeyringStoreProc.running) sessionKeyringStoreProc.running = false
-    sessionKeyringStoreProc.running = true
+  function recordAutoSubmitFailure() {
+    smartEnterFailures += 1
+    if (smartEnterFailures >= smartEnterFailureLimit) disarmSmartEnter("after-" + smartEnterFailures + "-failed-auto-submits")
+    else logEvent("smart-enter: auto-submit failed " + smartEnterFailures + "/" + smartEnterFailureLimit)
   }
 
   Timer {
-    id: sessionKeyringStoreWatchdog
+    id: legacyCleanupWatchdog
     interval: 3000
     repeat: false
     onTriggered: {
-      if (sessionKeyringStoreProc.running) {
-        root.logEvent("smart-enter: store-proc-timeout")
-        sessionKeyringStoreProc.running = false
+      if (legacyCleanupProc.running) {
+        root.logEvent("smart-enter: legacy-cleanup-timeout")
+        legacyCleanupProc.running = false
       }
     }
   }
 
+  // Versions before 2.0 kept a password verifier on disk and in the session
+  // keyring. Delete that state once at startup.
   Process {
-    id: sessionKeyringStoreProc
-    property string payload: ""
+    id: legacyCleanupProc
     command: [
       "/usr/bin/bash",
       "-c",
-      "read -r line; id=$(printf '%s' \"$line\" | /usr/bin/keyctl padd user omarchy:smart_enter @s) && /usr/bin/keyctl setperm \"$id\" 0x3f000000"
+      "/usr/bin/rm -f -- \"$HOME/.config/omarchy/lock_hash.json\" \"$HOME/.config/omarchy/smart_enter.json\"; if [ -x /usr/bin/keyctl ]; then /usr/bin/keyctl purge -s user omarchy:smart_enter >/dev/null 2>&1; fi; exit 0"
     ]
     clearEnvironment: true
     environment: ({
@@ -98,67 +92,8 @@ Item {
       "USER": root.userName,
       "HOME": root.home
     })
-    stdinEnabled: true
-    onStarted: {
-      sessionKeyringStoreWatchdog.restart()
-      write(payload)
-    }
-    onExited: function(exitCode) {
-      sessionKeyringStoreWatchdog.stop()
-      root.logEvent("smart-enter: keyring-stored exitCode=" + exitCode)
-    }
-  }
-
-  Timer {
-    id: sessionKeyringLoadWatchdog
-    interval: 3000
-    repeat: false
-    onTriggered: {
-      if (sessionKeyringLoadProc.running) {
-        root.logEvent("smart-enter: load-proc-timeout")
-        sessionKeyringLoadProc.running = false
-      }
-    }
-  }
-
-  Process {
-    id: sessionKeyringLoadProc
-    command: [
-      "/usr/bin/bash",
-      "-c",
-      "id=$(/usr/bin/keyctl search @s user omarchy:smart_enter 2>/dev/null) && [ -n \"$id\" ] && /usr/bin/keyctl pipe \"$id\""
-    ]
-    clearEnvironment: true
-    environment: ({
-      "PATH": "/usr/bin",
-      "LC_ALL": "C",
-      "USER": root.userName,
-      "HOME": root.home
-    })
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        var raw = String(text || "").trim()
-        if (raw.length > 0) {
-          try {
-            var data = JSON.parse(raw)
-            if (data && data.salt && data.verifier) {
-              root.sessionVerifier = data
-              root.logEvent("smart-enter: keyring-loaded")
-            }
-          } catch (e) {
-            console.log("smart-enter: failed to parse keyring session verifier: " + e)
-          }
-        }
-      }
-    }
-    onStarted: {
-      sessionKeyringLoadWatchdog.restart()
-    }
-    onExited: function(exitCode) {
-      sessionKeyringLoadWatchdog.stop()
-      root.logEvent("smart-enter: keyring-load exitCode=" + exitCode)
-    }
+    onStarted: legacyCleanupWatchdog.restart()
+    onExited: legacyCleanupWatchdog.stop()
   }
 
   readonly property bool locked: lockRequested || sessionLock.locked || sessionLock.secure
@@ -247,6 +182,7 @@ Item {
     failedAttempts = 0
     authenticatingPassword = false
     fingerprintAuthenticating = false
+    pendingAutoSubmit = false
     fingerprintRetryTimer.stop()
     if (passwordPam.active) passwordPam.abort()
     if (fingerprintPam.active) fingerprintPam.abort()
@@ -300,12 +236,13 @@ Item {
     if (!blankProcess.running) blankProcess.running = true
   }
 
-  function submitPassword(value) {
+  function submitPassword(value, autoSubmit) {
     var password = String(value || "")
     if (!lockRequested || authenticatingPassword || password.length === 0) return
 
     runWake()
     pendingPassword = password
+    pendingAutoSubmit = !!autoSubmit
     failureMessage = ""
     authenticatingPassword = true
 
@@ -323,6 +260,11 @@ Item {
   }
 
   function handlePasswordFailure() {
+    // A failed auto-submit is a typo or a stale remembered length. Repeated
+    // failures fall back to Enter until the next manual unlock succeeds.
+    if (pendingAutoSubmit) recordAutoSubmitFailure()
+    pendingAutoSubmit = false
+
     if (!lockRequested) return
 
     authenticatingPassword = false
@@ -395,8 +337,7 @@ Item {
       LockView {
         id: lockView
         anchors.fill: parent
-        smartEnterEnabled: root.smartEnterEnabled
-        sessionVerifier: root.sessionVerifier
+        autoSubmitLength: root.smartEnterLength
         backgroundPath: root.backgroundPath
         backgroundVersion: root.backgroundVersion
         fingerprintConfigured: root.fingerprintConfigured
@@ -407,7 +348,8 @@ Item {
         loadBackground: root.locked
         passwordText: root.enteredPassword
         onPasswordTextEdited: function(password) { root.enteredPassword = password }
-        onSubmitPassword: function(password) { root.submitPassword(password) }
+        onSubmitPassword: function(password) { root.submitPassword(password, false) }
+        onAutoSubmitPassword: function(password) { root.submitPassword(password, true) }
         onClearFailureRequested: root.failureMessage = ""
         onWakeRequested: root.runWake()
       }
@@ -455,12 +397,15 @@ Item {
 
     onCompleted: function(result) {
       root.authenticatingPassword = false
-      var validPassword = root.pendingPassword
+      var submittedLength = root.pendingPassword.length
+      var wasAutoSubmit = root.pendingAutoSubmit
       root.pendingPassword = ""
 
       if (!root.lockRequested) return
       if (result === PamResult.Success) {
-        root.recordSuccessfulPassword(validPassword)
+        root.pendingAutoSubmit = false
+        root.smartEnterFailures = 0
+        if (!wasAutoSubmit) root.primeSmartEnter(submittedLength)
         root.finishUnlock()
       } else {
         root.handlePasswordFailure()
@@ -587,7 +532,7 @@ Item {
       "LC_ALL": "C",
       "USER": root.userName,
       "HOME": root.home,
-      "XDG_RUNTIME_DIR": Quickshell.env("XDG_RUNTIME_DIR") || ("/run/user/" + root.userName),
+      "XDG_RUNTIME_DIR": Quickshell.env("XDG_RUNTIME_DIR") || "",
       "HYPRLAND_INSTANCE_SIGNATURE": Quickshell.env("HYPRLAND_INSTANCE_SIGNATURE") || ""
     })
     onStarted: strandedLockWatchdog.restart()
@@ -754,7 +699,7 @@ Item {
     refreshBackground()
     refreshFingerprintStatus()
     checkStrandedLock()
-    if (!sessionKeyringLoadProc.running) sessionKeyringLoadProc.running = true
+    legacyCleanupProc.running = true
   }
 
   IpcHandler {
@@ -781,8 +726,7 @@ Item {
         passwordPam: root.passwordPamConfigured,
         fingerprint: root.fingerprintConfigured,
         authenticating: root.authenticating,
-        smartEnterEnabled: root.smartEnterEnabled,
-        sessionPrimed: root.sessionVerifier !== null,
+        smartEnterArmed: root.smartEnterLength > 0,
         lastEvent: root.lastEvent,
         lastEventAt: root.lastEventAt
       })

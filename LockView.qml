@@ -1,10 +1,7 @@
 import QtQuick
 import QtQuick.Effects
-import Quickshell
-import Quickshell.Io
 import qs.Commons
 import qs.Ui
-import "Sha256.js" as Sha256
 
 Item {
   id: root
@@ -19,8 +16,12 @@ Item {
   property bool loadBackground: true
   property string passwordText: ""
   property bool syncingPasswordText: false
-  property bool smartEnterEnabled: false
-  property var sessionVerifier: null
+  // Length of the last manually accepted password; 0 disables auto-submit.
+  property int autoSubmitLength: 0
+  // Pause after typing reaches that length, so a further keystroke or Enter
+  // can still take over before anything is auto-submitted.
+  readonly property int autoSubmitDelay: 400
+  property int previousPasswordLength: 0
 
   readonly property string placeholderText: "Enter Password"
   readonly property int fieldWidth: 381
@@ -44,6 +45,7 @@ Item {
     : Border.surfaceSpec("lock", "border-active", Color.lock.borderActive, root.outlineThickness, "border-alpha")
 
   signal submitPassword(string password)
+  signal autoSubmitPassword(string password)
   signal passwordTextEdited(string password)
   signal clearFailureRequested()
   signal wakeRequested()
@@ -79,6 +81,19 @@ Item {
   Component.onCompleted: {
     syncPasswordText()
     if (inputEnabled) Qt.callLater(forcePasswordFocus)
+  }
+
+  Timer {
+    id: autoSubmitTimer
+    interval: root.autoSubmitDelay
+    repeat: false
+    onTriggered: {
+      var submitted = passwordInput.text
+      if (root.autoSubmitLength <= 0 || submitted.length !== root.autoSubmitLength) return
+      if (!root.inputEnabled || root.authenticatingPassword) return
+      root.passwordTextEdited("")
+      root.autoSubmitPassword(submitted)
+    }
   }
 
   // Measures the masked password at full size; passwordDotScale compares this
@@ -172,17 +187,16 @@ Item {
           }
           if (text.length > 0 && root.failureMessage.length > 0) root.clearFailureRequested()
 
-          if (root.smartEnterEnabled && root.sessionVerifier && root.sessionVerifier.salt && root.sessionVerifier.verifier && root.inputEnabled && !root.authenticatingPassword && text.length > 0) {
-            var candidateVerifier = Sha256.hmacSha256(root.sessionVerifier.salt, text)
-            if (candidateVerifier === root.sessionVerifier.verifier) {
-              var submitted = text
-              root.passwordTextEdited("")
-              root.submitPassword(submitted)
-            }
-          }
+          // Smart Enter: typing forward to the remembered length starts the
+          // grace period. Any other edit cancels it; deleting back down to the
+          // length does not start it.
+          if (root.autoSubmitLength > 0 && text.length === root.autoSubmitLength && root.previousPasswordLength < root.autoSubmitLength) autoSubmitTimer.restart()
+          else autoSubmitTimer.stop()
+          root.previousPasswordLength = text.length
         }
 
         onAccepted: {
+          autoSubmitTimer.stop()
           var submitted = root.passwordText
           root.passwordTextEdited("")
           if (submitted.length > 0) root.submitPassword(submitted)
