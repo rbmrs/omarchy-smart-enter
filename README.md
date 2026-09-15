@@ -26,7 +26,7 @@ PAM makes every decision, exactly as if you had pressed Enter.
 
 ### Trade-offs
 
-- Smart Enter waits 0.4 seconds after your input reaches the full length. Typing another key during that pause cancels the auto-submit, and pressing Enter submits normally. A typo still present after the pause is submitted and counts as one failed attempt.
+- Smart Enter waits 0.2 seconds after your input reaches the full length. Typing another key during that pause cancels the auto-submit, and pressing Enter submits normally. A typo still present after the pause is submitted and counts as one failed attempt.
 - Someone at your lock screen can learn your password's length by typing until it submits, at the cost of one failed attempt.
 - After the shell restarts, unlock once with Enter to re-arm.
 

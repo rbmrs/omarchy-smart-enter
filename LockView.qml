@@ -20,7 +20,7 @@ Item {
   property int autoSubmitLength: 0
   // Pause after typing reaches that length, so a further keystroke or Enter
   // can still take over before anything is auto-submitted.
-  readonly property int autoSubmitDelay: 400
+  readonly property int autoSubmitDelay: 200
   property int previousPasswordLength: 0
 
   readonly property string placeholderText: "Enter Password"
