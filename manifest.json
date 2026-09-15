@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "id": "omarchy-smart-enter",
+  "id": "io.github.rbmrs.smart-enter",
   "name": "Smart Enter Lock Screen",
   "version": "2.0.0",
   "author": "rbm",

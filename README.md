@@ -51,16 +51,16 @@ The output includes `"smartEnterArmed": true` once it is armed.
 ## Removal
 
 ```bash
-omarchy plugin remove omarchy-smart-enter
+omarchy plugin remove io.github.rbmrs.smart-enter
 ```
 
 This restores the stock Omarchy lock screen.
 
 ## Upgrading From 1.x
 
-Version 1.x stored a password verifier in the kernel session keyring and shipped a CLI and install scripts. Version 2 deletes the old keyring entry, `~/.config/omarchy/lock_hash.json`, and `~/.config/omarchy/smart_enter.json` automatically when it starts.
+Version 1.x stored a password verifier in the kernel session keyring, shipped a CLI and install scripts, and used the plugin ID `omarchy-smart-enter`. Version 2 uses `io.github.rbmrs.smart-enter`. Version 2 deletes the old keyring entry, `~/.config/omarchy/lock_hash.json`, and `~/.config/omarchy/smart_enter.json` automatically when it starts.
 
-If you installed 1.x with `install.sh`, reinstall so that removal restores the stock lock screen correctly:
+To upgrade from 1.x, reinstall under the new plugin ID:
 
 ```bash
 omarchy plugin remove omarchy-smart-enter
