@@ -11,7 +11,7 @@ Unlocks your Omarchy lock screen as soon as you finish typing your password: no 
 
 1. Unlock once the normal way: type your password and press **Enter**.
 2. When PAM accepts it, Smart Enter remembers **only the length** of that password, in the memory of the running shell.
-3. On later locks, the moment your input reaches that length, it is submitted to PAM automatically.
+3. On later locks, once you type up to that length and pause briefly, your input is submitted to PAM automatically.
 
 PAM makes every decision, exactly as if you had pressed Enter.
 
@@ -21,12 +21,12 @@ PAM makes every decision, exactly as if you had pressed Enter.
 
 - **Nothing derived from your password is stored.** No password, hash, salt, or verifier is kept on disk, in the kernel keyring, or in memory. Only the length is kept, and it is forgotten when the shell restarts.
 - **Every attempt goes through PAM.** Auto-submitted attempts count toward `pam_faillock` like any other attempt. There is no local password check that could be used to guess passwords without limits.
-- **A failed auto-submit disarms Smart Enter.** It stays off until your next successful Enter unlock, so a stale length after a password change costs at most one failed attempt.
+- **Repeated failures disarm Smart Enter.** After two failed auto-submits in a row it stays off until your next successful Enter unlock, so a stale length after a password change costs at most two failed attempts.
 - **Fingerprint unlock** works as in the stock lock screen and does not arm Smart Enter.
 
 ### Trade-offs
 
-- A typo still present when your input reaches the full length is submitted and counts as a failed attempt. Typos fixed with Backspace before that point cost nothing.
+- Smart Enter waits 0.4 seconds after your input reaches the full length. Typing another key during that pause cancels the auto-submit, and pressing Enter submits normally. A typo still present after the pause is submitted and counts as one failed attempt.
 - Someone at your lock screen can learn your password's length by typing until it submits, at the cost of one failed attempt.
 - After the shell restarts, unlock once with Enter to re-arm.
 

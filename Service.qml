@@ -39,17 +39,29 @@ Item {
   // or verifier is kept anywhere.
   property int smartEnterLength: 0
   property bool pendingAutoSubmit: false
+  // Consecutive failed auto-submits. One is usually a typo; repeated failures
+  // suggest a stale remembered length, so Smart Enter disarms.
+  property int smartEnterFailures: 0
+  readonly property int smartEnterFailureLimit: 2
 
   function primeSmartEnter(length) {
     if (length <= 0) return
+    smartEnterFailures = 0
     smartEnterLength = length
     logEvent("smart-enter: armed")
   }
 
   function disarmSmartEnter(reason) {
+    smartEnterFailures = 0
     if (smartEnterLength === 0) return
     smartEnterLength = 0
     logEvent("smart-enter: disarmed " + reason)
+  }
+
+  function recordAutoSubmitFailure() {
+    smartEnterFailures += 1
+    if (smartEnterFailures >= smartEnterFailureLimit) disarmSmartEnter("after-" + smartEnterFailures + "-failed-auto-submits")
+    else logEvent("smart-enter: auto-submit failed " + smartEnterFailures + "/" + smartEnterFailureLimit)
   }
 
   Timer {
@@ -248,9 +260,9 @@ Item {
   }
 
   function handlePasswordFailure() {
-    // A failed auto-submit means the remembered length is stale or the input
-    // was mistyped. Fall back to Enter until the next manual unlock succeeds.
-    if (pendingAutoSubmit) disarmSmartEnter("after-failed-auto-submit")
+    // A failed auto-submit is a typo or a stale remembered length. Repeated
+    // failures fall back to Enter until the next manual unlock succeeds.
+    if (pendingAutoSubmit) recordAutoSubmitFailure()
     pendingAutoSubmit = false
 
     if (!lockRequested) return
@@ -392,6 +404,7 @@ Item {
       if (!root.lockRequested) return
       if (result === PamResult.Success) {
         root.pendingAutoSubmit = false
+        root.smartEnterFailures = 0
         if (!wasAutoSubmit) root.primeSmartEnter(submittedLength)
         root.finishUnlock()
       } else {
