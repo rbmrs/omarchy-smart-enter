@@ -2,35 +2,14 @@
 
 Unlocks your Omarchy lock screen as soon as you finish typing your password: no Enter key required.
 
-[![Omarchy Plugin](https://img.shields.io/badge/omarchy-plugin-blue.svg)](https://omarchy.org/)
+[![Omarchy Plugin](https://img.shields.io/badge/omarchy-plugin-blue.svg)](https://omarchyplugins.com/plugin.html?id=io.github.rbmrs.smart-enter)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-
----
 
 ## How It Works
 
 1. Unlock once the normal way: type your password and press **Enter**.
 2. When PAM accepts it, Smart Enter remembers **only the length** of that password, in the memory of the running shell.
-3. On later locks, once you type up to that length and pause briefly, your input is submitted to PAM automatically.
-
-PAM makes every decision, exactly as if you had pressed Enter.
-
----
-
-## Security Model
-
-- **Nothing derived from your password is stored.** No password, hash, salt, or verifier is kept on disk, in the kernel keyring, or in memory. Only the length is kept, and it is forgotten when the shell restarts.
-- **Every attempt goes through PAM.** Auto-submitted attempts count toward `pam_faillock` like any other attempt. There is no local password check that could be used to guess passwords without limits.
-- **Repeated failures disarm Smart Enter.** After two failed auto-submits in a row it stays off until your next successful Enter unlock, so a stale length after a password change costs at most two failed attempts.
-- **Fingerprint unlock** works as in the stock lock screen and does not arm Smart Enter.
-
-### Trade-offs
-
-- Smart Enter waits 0.2 seconds after your input reaches the full length. Typing another key during that pause cancels the auto-submit, and pressing Enter submits normally. A typo still present after the pause is submitted and counts as one failed attempt.
-- Someone at your lock screen can learn your password's length by typing until it submits, at the cost of one failed attempt.
-- After the shell restarts, unlock once with Enter to re-arm.
-
----
+3. On later locks, once you type up to that length and pause for 0.2 seconds, your input is submitted to PAM automatically.
 
 ## Installation
 
@@ -38,29 +17,35 @@ PAM makes every decision, exactly as if you had pressed Enter.
 omarchy plugin add https://github.com/rbmrs/omarchy-smart-enter.git --enable
 ```
 
-Enabling Smart Enter replaces the stock Omarchy lock screen (`omarchy.lock`). Lock your screen (`Super+Esc`), unlock once with Enter, and later unlocks submit automatically.
+This replaces the stock Omarchy lock screen (`omarchy.lock`). Lock the screen with `Super+Ctrl+L`, unlock once with Enter, and later unlocks submit themselves. To check that it is armed, run `omarchy-shell lock status` and look for `smartEnterArmed`.
 
-To check whether Smart Enter is armed:
+Smart Enter is a fork of the stock lock screen, so run `omarchy plugin update io.github.rbmrs.smart-enter` after Omarchy updates.
+
+## Security and Trade-offs
+
+- **Only the length is remembered.** After a successful Enter unlock, Smart Enter keeps one number in the running shell's memory: how many characters that password had. No password, hash, salt, or verifier is written anywhere, on disk or in the kernel keyring, and the length itself is gone when the shell restarts.
+- **Every attempt goes through PAM.** There is no local password check, so nothing here can be used to guess your password without limits, and auto-submitted attempts count toward `pam_faillock` like any other attempt.
+- **Repeated failures disarm Smart Enter.** After two failed auto-submits with no successful password unlock in between, it stays off until your next Enter unlock. A password change therefore costs at most two failed attempts.
+- **The 0.2 second pause is the escape hatch.** Editing the field during the pause cancels the auto-submit, and Enter submits immediately. A typo still present when the pause ends is submitted and counts as one failed attempt. Only typing forward to the length starts the pause, so if you overshoot and delete back, press Enter.
+- **Your password's length is discoverable.** Someone at your lock screen can learn it by typing one character at a time and pausing after each, at the cost of one failed attempt.
+- **Fingerprint unlock** works as on the stock lock screen. It neither arms Smart Enter nor changes what it remembers.
+
+## Requirements
+
+Omarchy with its Quickshell-based shell. No other dependencies.
+
+## Disabling and Removal
 
 ```bash
-omarchy-shell lock status
+omarchy plugin disable io.github.rbmrs.smart-enter   # keep it installed
+omarchy plugin remove io.github.rbmrs.smart-enter    # uninstall
 ```
 
-The output includes `"smartEnterArmed": true` once it is armed.
-
-## Removal
-
-```bash
-omarchy plugin remove io.github.rbmrs.smart-enter
-```
-
-This restores the stock Omarchy lock screen.
+Either one restores the stock Omarchy lock screen.
 
 ## Upgrading From 1.x
 
-Version 1.x stored a password verifier in the kernel session keyring, shipped a CLI and install scripts, and used the plugin ID `omarchy-smart-enter`. Version 2 uses `io.github.rbmrs.smart-enter` and deletes the old keyring entry, `~/.config/omarchy/lock_hash.json`, and `~/.config/omarchy/smart_enter.json` automatically when it starts.
-
-To upgrade from 1.x, reinstall under the new plugin ID:
+Version 1.x stored a password verifier in the kernel session keyring, shipped a CLI, and used the plugin ID `omarchy-smart-enter`. Version 2 stores no verifier and deletes that state at startup. Reinstall under the new ID:
 
 ```bash
 omarchy plugin remove omarchy-smart-enter
@@ -70,15 +55,9 @@ omarchy plugin add https://github.com/rbmrs/omarchy-smart-enter.git --enable
 omarchy restart shell
 ```
 
-The shell can keep running the previously loaded 1.x code until it restarts, so restart it after upgrading by any method. Afterwards, `omarchy-shell lock status` should include `smartEnterArmed`.
+Smart Enter is a `keepLoaded` service, so the shell does not swap it out while running. Restart the shell after installing or updating by any method.
 
-`omarchy plugin remove` keeps a backup folder named `~/.config/omarchy/plugins/.omarchy-smart-enter.bak.*`, which you can delete.
-
-## Requirements
-
-Omarchy with its Quickshell-based shell. There are no other dependencies.
-
----
+If you installed 1.x with its `install.sh`, `omarchy plugin remove` leaves a backup folder at `~/.config/omarchy/plugins/.omarchy-smart-enter.bak.*`, which you can delete.
 
 ## License
 
