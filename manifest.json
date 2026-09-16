@@ -5,6 +5,7 @@
   "version": "2.0.0",
   "author": "rbm",
   "description": "Auto-submits your lock screen password as soon as you finish typing it: no Enter key required.",
+  "license": "MIT",
   "omarchy": {
     "capabilities": [
       "authentication"
