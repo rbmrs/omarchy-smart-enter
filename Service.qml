@@ -1,10 +1,10 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
-import Quickshell.Services.Pam
-import Quickshell.Wayland
-import qs.Commons
 
+// Smart Enter wraps the stock omarchy.lock service instead of forking it: the
+// upstream Service.qml runs unmodified (lock surface, PAM, IPC "lock" target),
+// and this file only watches its public state and calls submitPassword().
 Item {
   id: root
 
@@ -12,37 +12,36 @@ Item {
   property string omarchyPath: ""
 
   readonly property string home: Quickshell.env("HOME")
-  readonly property string stateHome: home + "/.local/state"
   readonly property string userName: Quickshell.env("USER") || Quickshell.env("LOGNAME")
-  readonly property string currentBackgroundLink: stateHome + "/omarchy/current/background"
+  readonly property string upstreamServiceUrl: omarchyPath.length > 0
+    ? "file://" + omarchyPath + "/shell/plugins/lock/Service.qml" : ""
+  readonly property var lock: upstreamLoader.status === Loader.Ready ? upstreamLoader.item : null
 
-  property bool lockRequested: false
-  property bool pendingSessionLock: false
-  property bool authenticatingPassword: false
-  property bool fingerprintAuthenticating: false
-  property bool passwordPamConfigured: false
-  property bool fingerprintConfigured: false
-  property bool previewVisible: false
-  property string enteredPassword: ""
-  property string pendingPassword: ""
-  property string failureMessage: ""
-  property int failedAttempts: 0
-  property string backgroundPath: ""
-  property int backgroundVersion: 0
-  property string lastEvent: "init"
-  property string lastEventAt: ""
-  property bool strandedLock: false
-  property bool strandedLockResolved: false
-  // Smart Enter: after a manual Enter unlock succeeds, only the password's
-  // length is kept, in memory. Input that reaches that length is submitted to
-  // PAM, so every attempt still counts toward pam_faillock. No password, hash,
-  // or verifier is kept anywhere.
+  // After a manual Enter unlock succeeds, only the password's length is kept,
+  // in memory. Input that reaches that length is submitted to PAM, so every
+  // attempt still counts toward pam_faillock. No password, hash, or verifier
+  // is kept anywhere.
   property int smartEnterLength: 0
-  property bool pendingAutoSubmit: false
   // Consecutive failed auto-submits. One is usually a typo; repeated failures
   // suggest a stale remembered length, so Smart Enter disarms.
   property int smartEnterFailures: 0
   readonly property int smartEnterFailureLimit: 2
+  // Pause after typing reaches the length, so a further keystroke or Enter can
+  // still take over before anything is auto-submitted.
+  readonly property int autoSubmitDelay: 200
+
+  property int previousPasswordLength: 0
+  // Set only for the duration of our own submitPassword() call.
+  property bool autoSubmitting: false
+  // The password attempt PAM is currently checking: its length and whether we
+  // submitted it. Cleared when it fails.
+  property int inFlightLength: 0
+  property bool inFlightAuto: false
+
+  function logEvent(event) {
+    if (lock) lock.logEvent(event)
+    else console.log("smart-enter " + event)
+  }
 
   function primeSmartEnter(length) {
     if (length <= 0) return
@@ -62,6 +61,91 @@ Item {
     smartEnterFailures += 1
     if (smartEnterFailures >= smartEnterFailureLimit) disarmSmartEnter("after-" + smartEnterFailures + "-failed-auto-submits")
     else logEvent("smart-enter: auto-submit failed " + smartEnterFailures + "/" + smartEnterFailureLimit)
+  }
+
+  function clearInFlight() {
+    inFlightLength = 0
+    inFlightAuto = false
+  }
+
+  function autoSubmit() {
+    if (!lock || smartEnterLength <= 0) return
+    if (!lock.lockRequested || lock.authenticatingPassword) return
+    var password = lock.enteredPassword
+    if (password.length !== smartEnterLength) return
+
+    autoSubmitting = true
+    lock.enteredPassword = ""
+    lock.submitPassword(password)
+    autoSubmitting = false
+  }
+
+  Loader {
+    id: upstreamLoader
+    source: root.upstreamServiceUrl
+    onLoaded: {
+      item.omarchyPath = root.omarchyPath
+      item.shell = root.shell
+    }
+    onStatusChanged: {
+      if (status === Loader.Error) console.warn("smart-enter: failed to load the stock lock service from " + source)
+    }
+  }
+
+  onShellChanged: if (lock) lock.shell = shell
+
+  Timer {
+    id: autoSubmitTimer
+    interval: root.autoSubmitDelay
+    repeat: false
+    onTriggered: root.autoSubmit()
+  }
+
+  Connections {
+    target: root.lock
+
+    // Typing forward to the remembered length starts the grace period. Any
+    // other edit cancels it (Enter clears the field first); deleting back down
+    // to the length does not start it.
+    function onEnteredPasswordChanged() {
+      var length = root.lock.enteredPassword.length
+      if (root.smartEnterLength > 0 && length === root.smartEnterLength && root.previousPasswordLength < root.smartEnterLength) autoSubmitTimer.restart()
+      else autoSubmitTimer.stop()
+      root.previousPasswordLength = length
+    }
+
+    // submitPassword() sets pendingPassword before PAM starts, and it is only
+    // cleared in between, so each attempt shows up here once.
+    function onPendingPasswordChanged() {
+      if (root.lock.pendingPassword.length === 0) return
+      root.inFlightLength = root.lock.pendingPassword.length
+      root.inFlightAuto = root.autoSubmitting
+    }
+
+    // A failed auto-submit is a typo or a stale remembered length. Repeated
+    // failures fall back to Enter until the next manual unlock succeeds.
+    function onFailedAttemptsChanged() {
+      if (root.lock.failedAttempts === 0) return
+      if (root.inFlightAuto) root.recordAutoSubmitFailure()
+      root.clearInFlight()
+    }
+
+    // PAM success clears authenticatingPassword and pendingPassword before
+    // finishUnlock() drops lockRequested. A fingerprint unlock or a lost
+    // session lock drops lockRequested with a password still in flight or
+    // none at all, so neither can arm Smart Enter.
+    function onLockRequestedChanged() {
+      autoSubmitTimer.stop()
+      if (root.lock.lockRequested) {
+        root.clearInFlight()
+        return
+      }
+      if (root.inFlightLength > 0 && !root.lock.authenticatingPassword && root.lock.pendingPassword.length === 0) {
+        root.smartEnterFailures = 0
+        if (!root.inFlightAuto) root.primeSmartEnter(root.inFlightLength)
+      }
+      root.clearInFlight()
+    }
   }
 
   Timer {
@@ -96,652 +180,17 @@ Item {
     onExited: legacyCleanupWatchdog.stop()
   }
 
-  readonly property bool locked: lockRequested || sessionLock.locked || sessionLock.secure
-  readonly property bool authenticating: authenticatingPassword || fingerprintAuthenticating
-
-  function realScreenCount() {
-    var screens = Quickshell.screens || []
-    var count = 0
-
-    for (var i = 0; i < screens.length; i++) {
-      var screen = screens[i]
-      if (screen && screen.name && screen.width > 0 && screen.height > 0) count += 1
-    }
-
-    return count
-  }
-
-  function hasRealScreen() {
-    return realScreenCount() > 0
-  }
-
-  function queueSessionLock() {
-    pendingSessionLock = true
-    if (!sessionLockStabilizeTimer.running) logEvent("lock-pending: screen-stabilizing")
-    sessionLockStabilizeTimer.restart()
-    if (!pendingSessionLockTimer.running) pendingSessionLockTimer.start()
-  }
-
-  function requestSessionLock() {
-    if (!lockRequested || sessionLock.locked || sessionLock.secure) return
-    if (sessionLockStabilizeTimer.running) return
-
-    if (!hasRealScreen()) {
-      if (!pendingSessionLock || lastEvent !== "lock-pending: no-real-screen") logEvent("lock-pending: no-real-screen")
-      pendingSessionLock = true
-      if (!pendingSessionLockTimer.running) pendingSessionLockTimer.start()
-      return
-    }
-
-    pendingSessionLock = false
-    pendingSessionLockTimer.stop()
-    sessionLock.locked = true
-  }
-
-  // ext-session-lock outlives its client, and a restart carries no lock over, so
-  // a session locked this early is an orphan behind Hyprland's failsafe. Outputs
-  // are often still absent here, so ask until the answer means something.
-  function checkStrandedLock() {
-    if (strandedLockResolved || strandedLockCheckProc.running) return
-
-    // A lock this shell took is nobody's orphan.
-    if (locked || lockRequested) {
-      strandedLockResolved = true
-      return
-    }
-
-    strandedLockCheckProc.running = true
-  }
-
-  function recoverStrandedLock() {
-    if (!strandedLock || locked || !passwordPamConfigured) return
-
-    strandedLock = false
-    logEvent("lock-stranded: recovering")
-    beginLock()
-  }
-
-  function refreshBackground() {
-    if (!readlinkProc.running) readlinkProc.running = true
-  }
-
-  function refreshFingerprintStatus() {
-    if (!fingerprintCheckProc.running) fingerprintCheckProc.running = true
-  }
-
-  function logEvent(event) {
-    lastEvent = event
-    lastEventAt = new Date().toISOString()
-    console.log("omarchy lock " + lastEventAt + " " + event)
-  }
-
-  function resetAuthenticationState() {
-    enteredPassword = ""
-    pendingPassword = ""
-    failureMessage = ""
-    failedAttempts = 0
-    authenticatingPassword = false
-    fingerprintAuthenticating = false
-    pendingAutoSubmit = false
-    fingerprintRetryTimer.stop()
-    if (passwordPam.active) passwordPam.abort()
-    if (fingerprintPam.active) fingerprintPam.abort()
-  }
-
-  function beginLock() {
-    if (!passwordPamConfigured) {
-      logEvent("lock-denied: missing-pam")
-      return false
-    }
-
-    resetAuthenticationState()
-    lockRequested = true
-    armBlankTimer()
-    logEvent("lock-requested")
-    queueSessionLock()
-
-    Qt.callLater(function() {
-      root.refreshBackground()
-      root.refreshFingerprintStatus()
-    })
-
-    return true
-  }
-
-  function finishUnlock() {
-    if (!root.locked && !lockRequested) return
-
-    lockRequested = false
-    pendingSessionLock = false
-    sessionLockStabilizeTimer.stop()
-    pendingSessionLockTimer.stop()
-    resetAuthenticationState()
-    idleBlankTimer.stop()
-    sessionLock.locked = false
-    logEvent("unlocked")
-    runWake()
-  }
-
-  function armBlankTimer() {
-    idleBlankTimer.armedAt = Date.now()
-    idleBlankTimer.restart()
-  }
-
-  function runWake() {
-    if (!wakeProcess.running) wakeProcess.running = true
-    if (lockRequested) armBlankTimer()
-  }
-
-  function runBlank() {
-    if (!blankProcess.running) blankProcess.running = true
-  }
-
-  function submitPassword(value, autoSubmit) {
-    var password = String(value || "")
-    if (!lockRequested || authenticatingPassword || password.length === 0) return
-
-    runWake()
-    pendingPassword = password
-    pendingAutoSubmit = !!autoSubmit
-    failureMessage = ""
-    authenticatingPassword = true
-
-    if (!passwordPam.start()) {
-      handlePasswordFailure()
-      return
-    }
-
-    Qt.callLater(respondToPasswordPrompt)
-  }
-
-  function respondToPasswordPrompt() {
-    if (!authenticatingPassword || !passwordPam.active || !passwordPam.responseRequired) return
-    passwordPam.respond(pendingPassword)
-  }
-
-  function handlePasswordFailure() {
-    // A failed auto-submit is a typo or a stale remembered length. Repeated
-    // failures fall back to Enter until the next manual unlock succeeds.
-    if (pendingAutoSubmit) recordAutoSubmitFailure()
-    pendingAutoSubmit = false
-
-    if (!lockRequested) return
-
-    authenticatingPassword = false
-    enteredPassword = ""
-    pendingPassword = ""
-    failedAttempts += 1
-    failureMessage = "Authentication failed (" + failedAttempts + ")"
-    runWake()
-  }
-
-  function startFingerprint() {
-    if (!lockRequested || !sessionLock.secure || !fingerprintConfigured) return
-    if (fingerprintPam.active || fingerprintAuthenticating) return
-
-    fingerprintAuthenticating = true
-    if (!fingerprintPam.start()) {
-      fingerprintAuthenticating = false
-    }
-  }
-
-  function handleFingerprintFinished(result) {
-    fingerprintAuthenticating = false
-
-    if (!lockRequested) return
-    if (result === PamResult.Success) {
-      finishUnlock()
-    } else if (fingerprintConfigured) {
-      fingerprintRetryTimer.restart()
-    }
-  }
-
-  WlSessionLock {
-    id: sessionLock
-
-    locked: false
-
-    onSecureStateChanged: {
-      root.logEvent("secure=" + secure)
-      if (secure) {
-        root.pendingSessionLock = false
-        sessionLockStabilizeTimer.stop()
-        pendingSessionLockTimer.stop()
-        root.startFingerprint()
-      }
-    }
-
-    onLockStateChanged: {
-      root.logEvent("session-locked=" + locked)
-
-      if (locked) {
-        root.pendingSessionLock = false
-        sessionLockStabilizeTimer.stop()
-        pendingSessionLockTimer.stop()
-      }
-
-      if (!locked && root.lockRequested) {
-        root.lockRequested = false
-        root.pendingSessionLock = false
-        sessionLockStabilizeTimer.stop()
-        pendingSessionLockTimer.stop()
-        root.resetAuthenticationState()
-        root.runWake()
-      }
-    }
-
-    WlSessionLockSurface {
-      id: lockSurface
-      color: Color.background
-
-      LockView {
-        id: lockView
-        anchors.fill: parent
-        autoSubmitLength: root.smartEnterLength
-        backgroundPath: root.backgroundPath
-        backgroundVersion: root.backgroundVersion
-        fingerprintConfigured: root.fingerprintConfigured
-        authenticatingPassword: root.authenticatingPassword
-        failureMessage: root.failureMessage
-        failedAttempts: root.failedAttempts
-        inputEnabled: root.lockRequested
-        loadBackground: root.locked
-        passwordText: root.enteredPassword
-        onPasswordTextEdited: function(password) { root.enteredPassword = password }
-        onSubmitPassword: function(password) { root.submitPassword(password, false) }
-        onAutoSubmitPassword: function(password) { root.submitPassword(password, true) }
-        onClearFailureRequested: root.failureMessage = ""
-        onWakeRequested: root.runWake()
-      }
-
-    }
-  }
-
-  PanelWindow {
-    id: previewWindow
-    visible: root.previewVisible
-    anchors { top: true; bottom: true; left: true; right: true }
-    color: "transparent"
-    WlrLayershell.namespace: "omarchy-lock-preview"
-    WlrLayershell.layer: WlrLayer.Overlay
-    WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
-    exclusionMode: ExclusionMode.Ignore
-
-    LockView {
-      anchors.fill: parent
-      backgroundPath: root.backgroundPath
-      backgroundVersion: root.backgroundVersion
-      fingerprintConfigured: root.fingerprintConfigured
-      authenticatingPassword: false
-      failureMessage: ""
-      failedAttempts: 0
-      inputEnabled: false
-      loadBackground: root.previewVisible
-      passwordText: ""
-    }
-
-    MouseArea {
-      anchors.fill: parent
-      acceptedButtons: Qt.LeftButton | Qt.RightButton
-      onClicked: root.previewVisible = false
-    }
-  }
-
-  PamContext {
-    id: passwordPam
-    config: "omarchy-lock-password"
-    user: root.userName
-
-    onResponseRequiredChanged: root.respondToPasswordPrompt()
-    onPamMessage: root.respondToPasswordPrompt()
-
-    onCompleted: function(result) {
-      root.authenticatingPassword = false
-      var submittedLength = root.pendingPassword.length
-      var wasAutoSubmit = root.pendingAutoSubmit
-      root.pendingPassword = ""
-
-      if (!root.lockRequested) return
-      if (result === PamResult.Success) {
-        root.pendingAutoSubmit = false
-        root.smartEnterFailures = 0
-        if (!wasAutoSubmit) root.primeSmartEnter(submittedLength)
-        root.finishUnlock()
-      } else {
-        root.handlePasswordFailure()
-      }
-    }
-
-    onError: function(error) {
-      root.handlePasswordFailure()
-    }
-  }
-
-  PamContext {
-    id: fingerprintPam
-    config: "omarchy-lock-fingerprint"
-    user: root.userName
-
-    onCompleted: function(result) {
-      root.handleFingerprintFinished(result)
-    }
-
-    onError: function(error) {
-      root.fingerprintAuthenticating = false
-      if (root.lockRequested && root.fingerprintConfigured) fingerprintRetryTimer.restart()
-    }
-  }
-
-  Timer {
-    id: fingerprintRetryTimer
-    interval: 250
-    repeat: false
-    onTriggered: root.startFingerprint()
-  }
-
-  Timer {
-    id: readlinkWatchdog
-    interval: 3000
-    repeat: false
-    onTriggered: {
-      if (readlinkProc.running) {
-        root.logEvent("lock: readlink-timeout")
-        readlinkProc.running = false
-      }
-    }
-  }
-
-  Process {
-    id: readlinkProc
-    command: ["/usr/bin/readlink", "-f", root.currentBackgroundLink]
-    clearEnvironment: true
-    environment: ({
-      "PATH": "/usr/bin",
-      "LC_ALL": "C",
-      "USER": root.userName,
-      "HOME": root.home
-    })
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        var next = String(text || "").trim()
-        if (next !== root.backgroundPath) {
-          root.backgroundPath = next
-          root.backgroundVersion += 1
-        }
-      }
-    }
-    onStarted: readlinkWatchdog.restart()
-    onExited: readlinkWatchdog.stop()
-  }
-
-  Timer {
-    id: fingerprintCheckWatchdog
-    interval: 3000
-    repeat: false
-    onTriggered: {
-      if (fingerprintCheckProc.running) {
-        root.logEvent("lock: fingerprint-check-timeout")
-        fingerprintCheckProc.running = false
-      }
-    }
-  }
-
-  Process {
-    id: fingerprintCheckProc
-    command: [
-      "/usr/bin/bash",
-      "-c",
-      "if [[ -f /etc/pam.d/omarchy-lock-fingerprint ]] && command -v /usr/bin/fprintd-list >/dev/null 2>&1 && /usr/bin/fprintd-list \"$USER\" 2>/dev/null | grep -qi finger; then echo yes; else echo no; fi"
-    ]
-    clearEnvironment: true
-    environment: ({
-      "PATH": "/usr/bin",
-      "LC_ALL": "C",
-      "USER": root.userName,
-      "HOME": root.home
-    })
-    stdout: StdioCollector { id: fingerprintCheckStdout; waitForEnd: true }
-    onStarted: fingerprintCheckWatchdog.restart()
-    onExited: function() {
-      fingerprintCheckWatchdog.stop()
-      root.fingerprintConfigured = String(fingerprintCheckStdout.text || "").trim() === "yes"
-      if (root.lockRequested && root.fingerprintConfigured) root.startFingerprint()
-      else if (!root.fingerprintConfigured && fingerprintPam.active) fingerprintPam.abort()
-    }
-  }
-
-  Timer {
-    id: strandedLockWatchdog
-    interval: 3000
-    repeat: false
-    onTriggered: {
-      if (strandedLockCheckProc.running) {
-        root.logEvent("lock: stranded-check-timeout")
-        strandedLockCheckProc.running = false
-      }
-    }
-  }
-
-  Process {
-    id: strandedLockCheckProc
-    command: ["/usr/bin/bash", "-c", "/usr/bin/omarchy-hyprland-session-locked"]
-    clearEnvironment: true
-    environment: ({
-      "PATH": "/usr/bin",
-      "LC_ALL": "C",
-      "USER": root.userName,
-      "HOME": root.home,
-      "XDG_RUNTIME_DIR": Quickshell.env("XDG_RUNTIME_DIR") || "",
-      "HYPRLAND_INSTANCE_SIGNATURE": Quickshell.env("HYPRLAND_INSTANCE_SIGNATURE") || ""
-    })
-    onStarted: strandedLockWatchdog.restart()
-    onExited: function(exitCode) {
-      strandedLockWatchdog.stop()
-      // No output to read the lock off yet.
-      if (exitCode === 2) return
-
-      root.strandedLockResolved = true
-
-      // A lock taken while this was in flight is this shell's own.
-      root.strandedLock = exitCode === 0 && !root.locked && !root.lockRequested
-      root.recoverStrandedLock()
-    }
-  }
-
-  Timer {
-    id: wakeWatchdog
-    interval: 3000
-    repeat: false
-    onTriggered: {
-      if (wakeProcess.running) {
-        root.logEvent("lock: wake-timeout")
-        wakeProcess.running = false
-      }
-    }
-  }
-
-  Process {
-    id: wakeProcess
-    command: ["/usr/bin/bash", "-c", "/usr/bin/omarchy-system-wake"]
-    clearEnvironment: true
-    environment: ({
-      "PATH": "/usr/bin",
-      "LC_ALL": "C",
-      "USER": root.userName,
-      "HOME": root.home
-    })
-    onStarted: wakeWatchdog.restart()
-    onExited: wakeWatchdog.stop()
-  }
-
-  Timer {
-    id: blankWatchdog
-    interval: 3000
-    repeat: false
-    onTriggered: {
-      if (blankProcess.running) {
-        root.logEvent("lock: blank-timeout")
-        blankProcess.running = false
-      }
-    }
-  }
-
-  Process {
-    id: blankProcess
-    command: [
-      "/usr/bin/bash",
-      "-c",
-      "/usr/bin/omarchy-brightness-keyboard off; /usr/bin/omarchy-brightness-display off"
-    ]
-    clearEnvironment: true
-    environment: ({
-      "PATH": "/usr/bin",
-      "LC_ALL": "C",
-      "USER": root.userName,
-      "HOME": root.home
-    })
-    onStarted: blankWatchdog.restart()
-    onExited: blankWatchdog.stop()
-  }
-
-  Timer {
-    id: idleBlankTimer
-    interval: 5000
-    repeat: false
-    property double armedAt: 0
-    onTriggered: {
-      // A countdown frozen by suspend fires right after resume, which would
-      // blank the freshly woken unlock screen under the user. Wall-clock time
-      // exposes the gap: take a fresh run-up instead of blanking.
-      if (Date.now() - armedAt > interval + 2000) {
-        root.armBlankTimer()
-        return
-      }
-      // Only a password check in flight should hold the display up. The
-      // fingerprint PAM stays armed for the whole lock, so gating on
-      // `authenticating` here would keep the panel lit until unlock.
-      if (root.lockRequested && !root.authenticatingPassword) root.runBlank()
-    }
-  }
-
-  Timer {
-    id: sessionLockStabilizeTimer
-    interval: 500
-    repeat: false
-    onTriggered: root.requestSessionLock()
-  }
-
-  Timer {
-    id: pendingSessionLockTimer
-    interval: 100
-    repeat: true
-    onTriggered: root.requestSessionLock()
-  }
-
-  Timer {
-    id: strandedLockRetryTimer
-    interval: 500
-    repeat: true
-    // Covers the compositor settling; screens coming back re-arm it.
-    readonly property int budget: 20
-    property int remaining: 20
-    running: !root.strandedLockResolved && remaining > 0
-
-    function rearm() {
-      if (!root.strandedLockResolved) remaining = budget
-    }
-
-    onTriggered: {
-      remaining -= 1
-      root.checkStrandedLock()
-    }
-  }
-
-  Connections {
-    target: Quickshell
-    function onScreensChanged() {
-      root.requestSessionLock()
-
-      // A monitor still coming up has no workspace, so cannot answer yet.
-      strandedLockRetryTimer.rearm()
-      root.checkStrandedLock()
-    }
-  }
-
-  onAuthenticatingPasswordChanged: {
-    if (!lockRequested) return
-    if (authenticatingPassword) idleBlankTimer.stop()
-    else armBlankTimer()
-  }
-
-  FileView {
-    path: "/etc/pam.d/omarchy-lock-password"
-    watchChanges: true
-    printErrors: false
-    onLoaded: root.passwordPamConfigured = true
-    onLoadFailed: root.passwordPamConfigured = false
-    onFileChanged: reload()
-  }
-
-  // No lock before PAM is known good. An answer from before then may be stale --
-  // the failsafe can be cleared from a TTY -- so re-ask rather than act on it.
-  onPasswordPamConfiguredChanged: {
-    if (!passwordPamConfigured) return
-
-    strandedLock = false
-    strandedLockResolved = false
-    strandedLockRetryTimer.rearm()
-    checkStrandedLock()
-  }
-
-  Component.onCompleted: {
-    refreshBackground()
-    refreshFingerprintStatus()
-    checkStrandedLock()
-    legacyCleanupProc.running = true
-  }
+  Component.onCompleted: legacyCleanupProc.running = true
 
   IpcHandler {
-    target: "lock"
-
-    function lock(): string {
-      if (!root.passwordPamConfigured) return "missing-pam"
-      if (!root.locked && !root.beginLock()) return "failed"
-      return "ok"
-    }
-
-    function isLocked(): string {
-      return root.locked ? "true" : "false"
-    }
+    target: "smart-enter"
 
     function status(): string {
       return JSON.stringify({
-        locked: root.locked,
-        requested: root.lockRequested,
-        pending: root.pendingSessionLock,
-        sessionLocked: sessionLock.locked,
-        secure: sessionLock.secure,
-        realScreens: root.realScreenCount(),
-        passwordPam: root.passwordPamConfigured,
-        fingerprint: root.fingerprintConfigured,
-        authenticating: root.authenticating,
-        smartEnterArmed: root.smartEnterLength > 0,
-        lastEvent: root.lastEvent,
-        lastEventAt: root.lastEventAt
+        loaded: root.lock !== null,
+        armed: root.smartEnterLength > 0,
+        failures: root.smartEnterFailures
       })
-    }
-
-    function preview(): string {
-      root.refreshBackground()
-      root.refreshFingerprintStatus()
-      root.previewVisible = true
-      return "ok"
-    }
-
-    function hidePreview(): string {
-      root.previewVisible = false
-      return "ok"
     }
   }
 }

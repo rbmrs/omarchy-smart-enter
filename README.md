@@ -17,9 +17,9 @@ Unlocks your Omarchy lock screen as soon as you finish typing your password: no 
 omarchy plugin add https://github.com/rbmrs/omarchy-smart-enter.git --enable
 ```
 
-This replaces the stock Omarchy lock screen (`omarchy.lock`). Lock the screen with `Super+Ctrl+L`, unlock once with Enter, and later unlocks submit themselves. To check that it is armed, run `omarchy-shell lock status` and look for `smartEnterArmed`.
+This replaces the stock Omarchy lock screen (`omarchy.lock`). Lock the screen with `Super+Ctrl+L`, unlock once with Enter, and later unlocks submit themselves. To check that it is armed, run `omarchy-shell smart-enter status` and look for `"armed":true`.
 
-Smart Enter is a fork of the stock lock screen, so run `omarchy plugin update io.github.rbmrs.smart-enter` after Omarchy updates.
+Smart Enter runs the stock lock screen unmodified and adds auto-submit on top, so lock screen fixes from Omarchy updates apply without updating the plugin.
 
 ## Security and Trade-offs
 
