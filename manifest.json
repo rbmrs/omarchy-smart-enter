@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.rbmrs.smart-enter",
   "name": "Smart Enter Lock Screen",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "author": "rbm",
   "description": "Auto-submits your lock screen password as soon as you finish typing it: no Enter key required.",
   "license": "MIT",
